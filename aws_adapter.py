@@ -23,16 +23,27 @@ class AWSCloudAdapter:
         try:
             paginator = iam.get_paginator('list_users')
             for page in paginator.paginate():
-                for user in page['Users']:
+                for user in page.get('Users', []):
                     username = user['UserName']
                     
                     # Fetch MFA devices
-                    mfa_devices = iam.list_mfa_devices(UserName=username)['MFADevices']
+                    mfa_devices = []
+                    try:
+                        mfa_response = iam.list_mfa_devices(UserName=username)
+                        mfa_devices = mfa_response.get('MFADevices', [])
+                    except ClientError:
+                        pass
+                        
                     has_mfa = len(mfa_devices) > 0
                     
-                    # Fetch attached policies
-                    policies = iam.list_attached_user_policies(UserName=username)['AttachedUserPolicies']
-                    policy_names = [p['PolicyName'] for p in policies]
+                    # Fetch attached policies safely
+                    policy_names = []
+                    try:
+                        policies_response = iam.list_attached_user_policies(UserName=username)
+                        policies = policies_response.get('AttachedUserPolicies', [])
+                        policy_names = [p.get('PolicyName', '') for p in policies]
+                    except ClientError:
+                        pass
                     
                     users_data.append({
                         "username": username,
@@ -56,7 +67,7 @@ class AWSCloudAdapter:
                 pab_status = False
                 try:
                     pab = s3.get_public_access_block(Bucket=name)
-                    config = pab['PublicAccessBlockConfiguration']
+                    config = pab.get('PublicAccessBlockConfiguration', {})
                     pab_status = all([
                         config.get('BlockPublicAcls', False),
                         config.get('IgnorePublicAcls', False),
