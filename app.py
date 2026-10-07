@@ -1,4 +1,5 @@
 import streamlit as st
+import time
 from aws_adapter import AWSCloudAdapter
 from auditor_engine import CloudSecurityAuditor
 from aws_remediator import AWSRemediator
@@ -11,7 +12,7 @@ st.subheader("Automated Cloud Security Auditor & Auto-Remediation Engine")
 st.sidebar.header("Controls")
 region = st.sidebar.selectbox("AWS Region", ["us-east-1", "us-west-2", "eu-west-1"])
 
-# Optional reset button to clear state back to initial screen during demo
+# Reset button to clear state back to initial screen
 if st.sidebar.button("🔄 Reset Dashboard State"):
     st.session_state.clear()
     st.rerun()
@@ -21,12 +22,12 @@ remediator = AWSRemediator(region_name=region)
 
 run_audit = st.sidebar.button("🔍 Run Live Audit")
 
-# Placeholders for dynamic metric and table updates
-score_container = st.empty()
-violations_container = st.empty()
+# Flag to trigger re-audit after remediation
+if "needs_audit" not in st.session_state:
+    st.session_state["needs_audit"] = False
 
-# ONLY execute audit when 'Run Live Audit' button is clicked
-if run_audit:
+# Execute audit when 'Run Live Audit' is clicked OR after remediation requires it
+if run_audit or st.session_state["needs_audit"]:
     with st.spinner("Fetching live infrastructure metadata from AWS..."):
         config = adapter.get_standardized_config()
         auditor = CloudSecurityAuditor(config)
@@ -34,15 +35,16 @@ if run_audit:
 
         st.session_state["score"] = score
         st.session_state["issues"] = issues
+        st.session_state["needs_audit"] = False
 
 # Render controls and score ONLY if 'score' exists in session state
 if "score" in st.session_state:
-    score_container.metric("Overall Security Posture Score", f"{st.session_state['score']:.2f}%")
+    st.metric("Overall Security Posture Score", f"{st.session_state['score']:.2f}%")
     
     st.write("### Active Violations")
-    violations_container.table(st.session_state["issues"])
-
+    
     if st.session_state["issues"]:
+        st.table(st.session_state["issues"])
         st.write("---")
         st.write("### Auto-Remediation Controls")
         col1, col2 = st.columns(2)
@@ -66,19 +68,12 @@ if "score" in st.session_state:
                             remediator.fix_s3_public_access(issue["resource"], dry_run=False)
                             remediator.fix_s3_encryption(issue["resource"], dry_run=False)
                     
-                    # Immediately query AWS for updated posture
-                    fresh_config = adapter.get_standardized_config()
-                    fresh_auditor = CloudSecurityAuditor(fresh_config)
-                    new_score, new_issues = fresh_auditor.generate_report()
+                    # Brief pause for AWS API propagation
+                    time.sleep(1)
                     
-                    # Update session state and refresh dynamic containers on screen
-                    st.session_state["score"] = new_score
-                    st.session_state["issues"] = new_issues
-                    
-                    score_container.metric("Overall Security Posture Score", f"{new_score:.2f}%")
-                    violations_container.table(new_issues)
-                    
-                    st.success("S3 Public Access Block & Encryption applied successfully!")
+                    # Set flag to perform a fresh audit and rerun the app top-to-bottom
+                    st.session_state["needs_audit"] = True
+                    st.rerun()
     else:
         st.success("🎉 Zero active vulnerabilities found! AWS environment is fully compliant.")
 else:
