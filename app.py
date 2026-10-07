@@ -14,11 +14,14 @@ region = st.sidebar.selectbox("AWS Region", ["us-east-1", "us-west-2", "eu-west-
 adapter = AWSCloudAdapter(region_name=region)
 remediator = AWSRemediator(region_name=region)
 
-# Always render the Audit button in the sidebar
 run_audit = st.sidebar.button("🔍 Run Live Audit")
 
-# Run initial audit on first load or when button is clicked
-if "score" not in st.session_state or run_audit:
+# Safe state flag initialization
+if "needs_audit" not in st.session_state:
+    st.session_state["needs_audit"] = True
+
+# Fetch live metadata if score is missing, audit button clicked, or flag set
+if "score" not in st.session_state or run_audit or st.session_state["needs_audit"]:
     with st.spinner("Fetching live infrastructure metadata from AWS..."):
         config = adapter.get_standardized_config()
         auditor = CloudSecurityAuditor(config)
@@ -27,8 +30,9 @@ if "score" not in st.session_state or run_audit:
         st.session_state["config"] = config
         st.session_state["score"] = score
         st.session_state["issues"] = issues
+        st.session_state["needs_audit"] = False  # Reset flag after successful audit
 
-# Display Score Header
+# Display Security Score Header
 st.metric("Overall Security Posture Score", f"{st.session_state['score']:.2f}%")
 
 st.write("### Active Violations")
@@ -61,18 +65,9 @@ if st.session_state["issues"]:
                         remediator.fix_s3_encryption(issue["resource"], dry_run=False)
                 
                 if has_storage:
-                    st.success("S3 Public Access Block & Encryption applied successfully!")
-                    
-                    # Perform live re-audit to calculate new score
-                    new_config = adapter.get_standardized_config()
-                    new_auditor = CloudSecurityAuditor(new_config)
-                    new_score, new_issues = new_auditor.generate_report()
-                    
-                    # Update session state to reflect score jump (e.g. 60% -> 80%)
-                    st.session_state["score"] = new_score
-                    st.session_state["issues"] = new_issues
-                    
-                    st.info("Updated Security Score recalculated below. Click 'Run Live Audit' in sidebar anytime to refresh completely.")
+                    # Flag that a fresh audit must run on the next cycle, then rerun UI
+                    st.session_state["needs_audit"] = True
+                    st.rerun()
                 else:
                     st.warning("No automated storage remediations available for remaining issues.")
 else:
