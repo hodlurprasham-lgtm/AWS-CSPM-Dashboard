@@ -14,8 +14,11 @@ region = st.sidebar.selectbox("AWS Region", ["us-east-1", "us-west-2", "eu-west-
 adapter = AWSCloudAdapter(region_name=region)
 remediator = AWSRemediator(region_name=region)
 
-# Initialize audit on first load or when "Run Live Audit" is clicked
-if "score" not in st.session_state or st.sidebar.button("🔍 Run Live Audit"):
+# Always render the Audit button in the sidebar
+run_audit = st.sidebar.button("🔍 Run Live Audit")
+
+# Run initial audit on first load or when button is clicked
+if "score" not in st.session_state or run_audit:
     with st.spinner("Fetching live infrastructure metadata from AWS..."):
         config = adapter.get_standardized_config()
         auditor = CloudSecurityAuditor(config)
@@ -69,7 +72,7 @@ if st.session_state["issues"]:
                     st.session_state["score"] = new_score
                     st.session_state["issues"] = new_issues
                     
-                    st.info("Updated Security Score recalculated below. Click 'Run Live Audit' anytime to refresh completely.")
+                    st.info("Updated Security Score recalculated below. Click 'Run Live Audit' in sidebar anytime to refresh completely.")
                 else:
                     st.warning("No automated storage remediations available for remaining issues.")
 else:
