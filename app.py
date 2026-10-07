@@ -16,21 +16,15 @@ remediator = AWSRemediator(region_name=region)
 
 run_audit = st.sidebar.button("🔍 Run Live Audit")
 
-# Safe state flag initialization
-if "needs_audit" not in st.session_state:
-    st.session_state["needs_audit"] = True
-
-# Fetch live metadata if score is missing, audit button clicked, or flag set
-if "score" not in st.session_state or run_audit or st.session_state["needs_audit"]:
+# Always do a live audit if score isn't set OR audit button clicked
+if "score" not in st.session_state or run_audit:
     with st.spinner("Fetching live infrastructure metadata from AWS..."):
         config = adapter.get_standardized_config()
         auditor = CloudSecurityAuditor(config)
         score, issues = auditor.generate_report()
 
-        st.session_state["config"] = config
         st.session_state["score"] = score
         st.session_state["issues"] = issues
-        st.session_state["needs_audit"] = False  # Reset flag after successful audit
 
 # Display Security Score Header
 st.metric("Overall Security Posture Score", f"{st.session_state['score']:.2f}%")
@@ -57,18 +51,18 @@ if st.session_state["issues"]:
     with col2:
         if st.button("⚡ Execute Live Auto-Remediation"):
             with st.spinner("Applying live security patches to AWS..."):
-                has_storage = False
                 for issue in st.session_state["issues"]:
                     if issue["category"] == "Storage":
-                        has_storage = True
                         remediator.fix_s3_public_access(issue["resource"], dry_run=False)
                         remediator.fix_s3_encryption(issue["resource"], dry_run=False)
                 
-                if has_storage:
-                    # Flag that a fresh audit must run on the next cycle, then rerun UI
-                    st.session_state["needs_audit"] = True
-                    st.rerun()
-                else:
-                    st.warning("No automated storage remediations available for remaining issues.")
+                # Directly execute fresh audit & update state variables in place
+                fresh_config = adapter.get_standardized_config()
+                fresh_auditor = CloudSecurityAuditor(fresh_config)
+                new_score, new_issues = fresh_auditor.generate_report()
+                
+                st.session_state["score"] = new_score
+                st.session_state["issues"] = new_issues
+                st.rerun()
 else:
     st.success("🎉 Zero active vulnerabilities found! AWS environment is fully compliant.")
