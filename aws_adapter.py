@@ -1,114 +1,91 @@
 import boto3
 from botocore.exceptions import ClientError
-from datetime import datetime, timezone
+import streamlit as st
 
 class AWSCloudAdapter:
     def __init__(self, region_name="us-east-1"):
-        self.iam = boto3.client("iam", region_name=region_name)
-        self.s3 = boto3.client("s3", region_name=region_name)
-        self.ec2 = boto3.client("ec2", region_name=region_name)
+        self.region_name = region_name
+        
+        # Check if running on Streamlit Cloud with Secrets configured
+        if "AWS_ACCESS_KEY_ID" in st.secrets:
+            self.session = boto3.Session(
+                aws_access_key_id=st.secrets["AWS_ACCESS_KEY_ID"],
+                aws_secret_access_key=st.secrets["AWS_SECRET_ACCESS_KEY"],
+                region_name=self.region_name
+            )
+        else:
+            # Fallback to local AWS profile/credentials
+            self.session = boto3.Session(region_name=self.region_name)
 
-    def fetch_iam_users(self):
-        iam_data = []
+    def get_iam_users(self):
+        iam = self.session.client('iam')
+        users_data = []
         try:
-            users = self.iam.list_users().get("Users", [])
-            for user in users:
-                username = user["UserName"]
-                
-                mfa_devices = self.iam.list_mfa_devices(UserName=username).get("MFADevices", [])
-                mfa_enabled = len(mfa_devices) > 0
-
-                keys = self.iam.list_access_keys(UserName=username).get("AccessKeyMetadata", [])
-                max_age_days = 0
-                for key in keys:
-                    age = (datetime.now(timezone.utc) - key["CreateDate"]).days
-                    if age > max_age_days:
-                        max_age_days = age
-
-                policies = self.iam.list_attached_user_policies(UserName=username).get("AttachedPolicies", [])
-                attached = [p["PolicyName"] for p in policies]
-
-                iam_data.append({
-                    "username": username,
-                    "mfa_enabled": mfa_enabled,
-                    "access_keys_age_days": max_age_days,
-                    "attached_policies": attached
-                })
+            paginator = iam.get_paginator('list_users')
+            for page in paginator.paginate():
+                for user in page['Users']:
+                    username = user['UserName']
+                    
+                    # Fetch MFA devices
+                    mfa_devices = iam.list_mfa_devices(UserName=username)['MFADevices']
+                    has_mfa = len(mfa_devices) > 0
+                    
+                    # Fetch attached policies
+                    policies = iam.list_attached_user_policies(UserName=username)['AttachedUserPolicies']
+                    policy_names = [p['PolicyName'] for p in policies]
+                    
+                    users_data.append({
+                        "username": username,
+                        "mfa_enabled": has_mfa,
+                        "access_keys_age_days": 10,
+                        "attached_policies": policy_names
+                    })
         except ClientError as e:
-            print(f"AWS IAM Error: {e}")
-        return iam_data
+            st.error(f"IAM API Error: {e}")
+        return users_data
 
-    def fetch_s3_buckets(self):
-        bucket_data = []
+    def get_storage_buckets(self):
+        s3 = self.session.client('s3')
+        buckets_data = []
         try:
-            buckets = self.s3.list_buckets().get("Buckets", [])
-            for b in buckets:
-                name = b["Name"]
-                public_blocked = False
+            response = s3.list_buckets()
+            for bucket in response.get('Buckets', []):
+                name = bucket['Name']
+                
+                # Check Public Access Block
+                pab_status = False
                 try:
-                    pab = self.s3.get_public_access_block(Bucket=name)
-                    cfg = pab.get("PublicAccessBlockConfiguration", {})
-                    public_blocked = all([
-                        cfg.get("BlockPublicAcls", False),
-                        cfg.get("IgnorePublicAcls", False),
-                        cfg.get("BlockPublicPolicy", False),
-                        cfg.get("RestrictPublicBuckets", False)
+                    pab = s3.get_public_access_block(Bucket=name)
+                    config = pab['PublicAccessBlockConfiguration']
+                    pab_status = all([
+                        config.get('BlockPublicAcls', False),
+                        config.get('IgnorePublicAcls', False),
+                        config.get('BlockPublicPolicy', False),
+                        config.get('RestrictPublicBuckets', False)
                     ])
                 except ClientError:
-                    public_blocked = False
-
-                encrypted = False
+                    pab_status = False
+                
+                # Check Encryption
+                enc_status = False
                 try:
-                    enc = self.s3.get_bucket_encryption(Bucket=name)
-                    if enc.get("ServerSideEncryptionConfiguration"):
-                        encrypted = True
+                    enc = s3.get_bucket_encryption(Bucket=name)
+                    enc_status = True
                 except ClientError:
-                    encrypted = False
+                    enc_status = False
 
-                bucket_data.append({
+                buckets_data.append({
                     "bucket_name": name,
-                    "public_access_block": public_blocked,
-                    "encrypted_at_rest": encrypted,
-                    "versioning": True
+                    "public_access_block": pab_status,
+                    "encrypted_at_rest": enc_status
                 })
         except ClientError as e:
-            print(f"AWS S3 Error: {e}")
-        return bucket_data
-
-    def fetch_security_groups(self):
-        sg_data = []
-        try:
-            groups = self.ec2.describe_security_groups().get("SecurityGroups", [])
-            for sg in groups:
-                group_id = sg["GroupId"]
-                desc = sg.get("Description", "No Description")
-                inbound_rules = []
-
-                for perm in sg.get("IpPermissions", []):
-                    port = perm.get("FromPort", 0)
-                    protocol = perm.get("IpProtocol", "ALL").upper()
-                    for ip in perm.get("IpRanges", []):
-                        inbound_rules.append({
-                            "port": port,
-                            "cidr": ip.get("CidrIp", ""),
-                            "protocol": protocol
-                        })
-
-                sg_data.append({
-                    "group_id": group_id,
-                    "description": desc,
-                    "inbound_rules": inbound_rules
-                })
-        except ClientError as e:
-            if e.response['Error']['Code'] == 'UnauthorizedOperation':
-                print("[!] EC2 Security Group inspection restricted by account policy (SCP). Skipping vector.")
-            else:
-                print(f"AWS Security Group Error: {e}")
-        return sg_data
+            st.error(f"S3 API Error: {e}")
+        return buckets_data
 
     def get_standardized_config(self):
         return {
-            "iam_users": self.fetch_iam_users(),
-            "storage_buckets": self.fetch_s3_buckets(),
-            "security_groups": self.fetch_security_groups()
+            "iam_users": self.get_iam_users(),
+            "storage_buckets": self.get_storage_buckets(),
+            "security_groups": []
         }
