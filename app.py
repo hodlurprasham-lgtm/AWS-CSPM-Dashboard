@@ -2,6 +2,9 @@ import streamlit as st
 from aws_adapter import AWSCloudAdapter
 from auditor_engine import CloudSecurityAuditor
 from aws_remediator import AWSRemediator
+import io
+import csv
+from datetime import datetime
 
 # ─── Page Config ──────────────────────────────────────────────────────────────
 st.set_page_config(
@@ -744,6 +747,199 @@ if "score" in st.session_state:
                     st.session_state["score"]  = 80.0
 
                     st.rerun()
+
+        # ══════════════════════════════════════════════════════════════════════
+        # FEATURE 1 — Security Analytics Charts
+        # ══════════════════════════════════════════════════════════════════════
+        st.markdown("<br>", unsafe_allow_html=True)
+        st.markdown("""
+        <div class="section-header">
+            <div class="section-title">📊 Security Analytics</div>
+        </div>
+        """, unsafe_allow_html=True)
+
+        chart_col1, chart_col2 = st.columns(2, gap="medium")
+
+        with chart_col1:
+            st.markdown('<div class="cspm-card-header">Findings by Severity</div>', unsafe_allow_html=True)
+            severity_order = ["CRITICAL", "HIGH", "MEDIUM", "LOW"]
+            sev_counts = {s: 0 for s in severity_order}
+            for iss in issues:
+                sev = iss.get("severity", "LOW")
+                if sev in sev_counts:
+                    sev_counts[sev] += 1
+            import pandas as pd
+            sev_df = pd.DataFrame({"Count": list(sev_counts.values())}, index=list(sev_counts.keys()))
+            st.bar_chart(sev_df, color="#f85149", height=220)
+
+        with chart_col2:
+            st.markdown('<div class="cspm-card-header">Findings by Category</div>', unsafe_allow_html=True)
+            cat_counts = {}
+            for iss in issues:
+                cat = iss.get("category", "Unknown")
+                cat_counts[cat] = cat_counts.get(cat, 0) + 1
+            cat_df = pd.DataFrame({"Count": list(cat_counts.values())}, index=list(cat_counts.keys()))
+            st.bar_chart(cat_df, color="#58a6ff", height=220)
+
+        # ══════════════════════════════════════════════════════════════════════
+        # FEATURE 2 — One-Click CSV Audit Report Export
+        # ══════════════════════════════════════════════════════════════════════
+        st.markdown("<br>", unsafe_allow_html=True)
+        st.markdown("""
+        <div class="section-header">
+            <div class="section-title">📥 Export Audit Report</div>
+        </div>
+        """, unsafe_allow_html=True)
+
+        st.markdown("""
+        <div class="cspm-card">
+            <div class="cspm-card-header">📄 Download full audit findings as a CSV report</div>
+            <p style="font-size:13px;color:#8b949e;margin:6px 0 0 0;">
+                Export a timestamped, portable CSV report of all current findings — share with your
+                security team, attach to a ticket, or archive for compliance records.
+            </p>
+        </div>
+        """, unsafe_allow_html=True)
+
+        csv_buffer = io.StringIO()
+        writer = csv.writer(csv_buffer)
+        writer.writerow(["Timestamp", "Region", "Security Score (%)", "Severity", "Category", "Resource", "Issue"])
+        scan_ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        for iss in issues:
+            writer.writerow([
+                scan_ts, region, f"{score:.2f}",
+                iss.get("severity", ""), iss.get("category", ""),
+                iss.get("resource", ""), iss.get("issue", ""),
+            ])
+        csv_content = csv_buffer.getvalue()
+        filename = f"cspm_audit_{region}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
+        st.download_button(
+            label="⬇️ Download Audit Report (CSV)",
+            data=csv_content,
+            file_name=filename,
+            mime="text/csv",
+        )
+
+        # ══════════════════════════════════════════════════════════════════════
+        # FEATURE 3 — CIS AWS Benchmark Compliance Mapper
+        # ══════════════════════════════════════════════════════════════════════
+        st.markdown("<br>", unsafe_allow_html=True)
+        st.markdown("""
+        <div class="section-header">
+            <div class="section-title">🏛️ CIS AWS Benchmark Compliance</div>
+            <span class="count-badge">CIS AWS Foundations v1.4</span>
+        </div>
+        """, unsafe_allow_html=True)
+
+        st.markdown("""
+        <div style="font-size:13px;color:#8b949e;margin-bottom:16px;line-height:1.6;">
+            Your findings are mapped against the <strong style="color:#e6edf3;">CIS AWS Foundations Benchmark v1.4</strong>
+            — the industry-standard security baseline used by enterprise CSPM platforms like Prisma Cloud and Wiz.
+        </div>
+        """, unsafe_allow_html=True)
+
+        CIS_CONTROLS = {
+            ("IAM",     "MFA is disabled"):                      ("1.10", "Section 1 — Identity & Access", "Ensure MFA is enabled for all IAM users with console access"),
+            ("IAM",     "wildcard policy"):                      ("1.16", "Section 1 — Identity & Access", "Ensure IAM policies that allow full admin are not directly attached"),
+            ("IAM",     "access key age"):                       ("1.14", "Section 1 — Identity & Access", "Ensure access keys are rotated every 90 days or less"),
+            ("Storage", "Public Access Block is disabled"):      ("2.1.2", "Section 2 — Storage",           "Ensure S3 Block Public Access setting is enabled"),
+            ("Storage", "Server-Side Encryption"):               ("2.1.1", "Section 2 — Storage",           "Ensure all S3 buckets employ encryption-at-rest"),
+            ("Network", "port 22"):                              ("5.2",   "Section 5 — Networking",         "Ensure no security groups allow unrestricted ingress to port 22"),
+            ("Network", "port 3389"):                            ("5.3",   "Section 5 — Networking",         "Ensure no security groups allow unrestricted ingress to port 3389"),
+        }
+
+        def match_cis(issue_cat, issue_text):
+            for (cat, keyword), ctrl in CIS_CONTROLS.items():
+                if cat == issue_cat and keyword.lower() in issue_text.lower():
+                    return ctrl
+            return None
+
+        sections = {}
+        for (cat, keyword), (ctrl_id, section, description) in CIS_CONTROLS.items():
+            if section not in sections:
+                sections[section] = {"passed": 0, "failed": 0, "controls": {}}
+            if ctrl_id not in sections[section]["controls"]:
+                sections[section]["controls"][ctrl_id] = {
+                    "id": ctrl_id, "desc": description,
+                    "resources": [], "status": "PASS", "severity": ""
+                }
+
+        for iss in issues:
+            ctrl = match_cis(iss.get("category", ""), iss.get("issue", ""))
+            if ctrl:
+                ctrl_id, section, _ = ctrl
+                c = sections[section]["controls"][ctrl_id]
+                if c["status"] == "PASS":
+                    sections[section]["failed"]  += 1
+                    sections[section]["passed"]  = max(0, sections[section]["passed"] - 0)
+                c["status"]   = "FAIL"
+                c["severity"] = iss.get("severity", "")
+                c["resources"].append(iss.get("resource", ""))
+
+        for section, data in sections.items():
+            data["passed"] = sum(1 for c in data["controls"].values() if c["status"] == "PASS")
+            data["failed"] = sum(1 for c in data["controls"].values() if c["status"] == "FAIL")
+
+        total_pass = sum(v["passed"] for v in sections.values())
+        total_fail = sum(v["failed"] for v in sections.values())
+        total_ctrl = total_pass + total_fail
+        cis_score  = (total_pass / total_ctrl * 100) if total_ctrl > 0 else 100.0
+        cis_color  = "#3fb950" if cis_score >= 80 else "#d29922" if cis_score >= 50 else "#f85149"
+
+        st.markdown(f"""
+        <div class="cspm-card" style="margin-bottom:16px;">
+            <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;">
+                <div>
+                    <div style="font-size:13px;font-weight:700;color:#e6edf3;">Overall CIS Compliance Score</div>
+                    <div style="font-size:12px;color:#8b949e;margin-top:2px;">{total_pass} of {total_ctrl} controls passing</div>
+                </div>
+                <div style="font-size:36px;font-weight:800;color:{cis_color};">{cis_score:.0f}%</div>
+            </div>
+            <div style="background:#21262d;border-radius:6px;height:8px;overflow:hidden;">
+                <div style="width:{cis_score:.1f}%;height:100%;background:{cis_color};border-radius:6px;"></div>
+            </div>
+        </div>
+        """, unsafe_allow_html=True)
+
+        section_order = ["Section 1 — Identity & Access", "Section 2 — Storage", "Section 5 — Networking"]
+        for section_name in section_order:
+            if section_name not in sections:
+                continue
+            data      = sections[section_name]
+            n_pass    = data["passed"]
+            n_fail    = data["failed"]
+            n_total   = n_pass + n_fail
+            sec_score = (n_pass / n_total * 100) if n_total > 0 else 100.0
+            sec_icon  = "✅" if sec_score == 100 else ("⚠️" if sec_score >= 50 else "❌")
+            with st.expander(f"{sec_icon}  {section_name}  —  {n_pass}/{n_total} passing  ({sec_score:.0f}%)", expanded=(n_fail > 0)):
+                rows = ""
+                for ctrl in sorted(data["controls"].values(), key=lambda x: (x["status"] == "PASS")):
+                    status_html = (
+                        '<span style="color:#f85149;font-weight:700;">✗ FAIL</span>'
+                        if ctrl["status"] == "FAIL"
+                        else '<span style="color:#3fb950;font-weight:700;">✓ PASS</span>'
+                    )
+                    sev_html  = f'<span class="sev-badge sev-{ctrl["severity"]}">{ctrl["severity"]}</span>' if ctrl["severity"] else "—"
+                    res_html  = ", ".join(f'<code style="color:#79c0ff;font-size:12px;">{r}</code>' for r in ctrl["resources"]) or "—"
+                    rows += f"""<tr style="border-bottom:1px solid #21262d;">
+                        <td style="padding:10px 12px;font-size:12px;color:#8b949e;white-space:nowrap;font-weight:600;">CIS {ctrl['id']}</td>
+                        <td style="padding:10px 12px;font-size:13px;color:#c9d1d9;line-height:1.4;">{ctrl['desc']}</td>
+                        <td style="padding:10px 12px;">{res_html}</td>
+                        <td style="padding:10px 12px;">{sev_html}</td>
+                        <td style="padding:10px 12px;">{status_html}</td>
+                    </tr>"""
+                st.markdown(f"""
+                <table style="width:100%;border-collapse:collapse;">
+                    <thead><tr style="border-bottom:1px solid #30363d;">
+                        <th style="padding:8px 12px;font-size:11px;color:#8b949e;text-align:left;text-transform:uppercase;letter-spacing:0.6px;white-space:nowrap;">Control</th>
+                        <th style="padding:8px 12px;font-size:11px;color:#8b949e;text-align:left;text-transform:uppercase;letter-spacing:0.6px;">Description</th>
+                        <th style="padding:8px 12px;font-size:11px;color:#8b949e;text-align:left;text-transform:uppercase;letter-spacing:0.6px;">Resource</th>
+                        <th style="padding:8px 12px;font-size:11px;color:#8b949e;text-align:left;text-transform:uppercase;letter-spacing:0.6px;">Severity</th>
+                        <th style="padding:8px 12px;font-size:11px;color:#8b949e;text-align:left;text-transform:uppercase;letter-spacing:0.6px;">Status</th>
+                    </tr></thead>
+                    <tbody>{rows}</tbody>
+                </table>
+                """, unsafe_allow_html=True)
 
     else:
         # ── Zero Violations Success State ─────────────────────────────────────
